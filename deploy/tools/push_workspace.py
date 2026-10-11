@@ -20,10 +20,11 @@ import getpass
 import json
 import os
 import sys
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -63,9 +64,23 @@ class Client:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         req = Request(self.base + path, data=body, method=method, headers=headers)
-        with urlopen(req, timeout=60) as resp:
-            raw = resp.read()
-        return json.loads(raw) if raw else {}
+        # Retry connection-level failures (TLS resets, timeouts); every call
+        # here is safe to repeat. HTTP errors are real answers and propagate.
+        for attempt in range(1, 7):
+            try:
+                with urlopen(req, timeout=60) as resp:
+                    raw = resp.read()
+                return json.loads(raw) if raw else {}
+            except HTTPError:
+                raise
+            except (URLError, OSError) as exc:
+                if attempt == 6:
+                    raise
+                print(
+                    f"     retry {attempt}/5 {method} {path.split('?')[0]}: {exc}", file=sys.stderr
+                )
+                time.sleep(min(2**attempt, 20))
+        raise AssertionError("unreachable")
 
     def login(self, username: str, password: str) -> None:
         body = json.dumps({"username": username, "password": password}).encode()
