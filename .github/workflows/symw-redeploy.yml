@@ -1,0 +1,73 @@
+name: Redeploy existing 生意喵 Octop digest
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release in app-YYYYMMDD.N format
+        required: true
+        type: string
+      digest:
+        description: Existing ACR digest in sha256:... format
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symw-octop-production-release
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: symw
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate redeploy configuration
+        shell: bash
+        env:
+          ACR_REGISTRY_VPC: ${{ vars.ACR_REGISTRY_VPC }}
+          ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
+          ECS_REGION_ID: ${{ vars.ECS_REGION_ID }}
+          ECS_INSTANCE_ID: ${{ vars.ECS_INSTANCE_ID }}
+          DEPLOY_RELEASE: ${{ inputs.release }}
+          DEPLOY_DIGEST: ${{ inputs.digest }}
+        run: |
+          missing=()
+          for name in \
+            ACR_REGISTRY_VPC ACR_NAMESPACE \
+            ALIBABA_CLOUD_ACCESS_KEY_ID ALIBABA_CLOUD_ACCESS_KEY_SECRET \
+            ECS_REGION_ID ECS_INSTANCE_ID DEPLOY_RELEASE DEPLOY_DIGEST; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing GitHub environment configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          [[ "$DEPLOY_RELEASE" =~ ^app-[0-9]{8}\.[0-9]+$ ]]
+          [[ "$DEPLOY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+      - name: Install Alibaba Cloud CLI
+        run: |
+          curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz -o /tmp/aliyun-cli.tgz
+          tar -xzf /tmp/aliyun-cli.tgz -C /tmp
+          sudo install -m 0755 /tmp/aliyun /usr/local/bin/aliyun
+          aliyun version
+      - name: Deploy existing digest through Cloud Assistant
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
+          ALIBABA_CLOUD_REGION_ID: ${{ vars.ECS_REGION_ID }}
+          ECS_REGION_ID: ${{ vars.ECS_REGION_ID }}
+          ECS_INSTANCE_ID: ${{ vars.ECS_INSTANCE_ID }}
+          DEPLOY_RELEASE: ${{ inputs.release }}
+          DEPLOY_DIGEST: ${{ inputs.digest }}
+          IMAGE_REPOSITORY_VPC: ${{ vars.ACR_REGISTRY_VPC }}/${{ vars.ACR_NAMESPACE }}/symw-octop
+        run: |
+          deploy_image="$IMAGE_REPOSITORY_VPC@$DEPLOY_DIGEST"
+          .github/scripts/symw_run_cloud_assistant.sh "$deploy_image" "$DEPLOY_RELEASE"

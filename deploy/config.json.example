@@ -1,0 +1,14 @@
+{
+  "default_timezone": "Asia/Shanghai",
+  "enable_api_docs": false,
+  "require_setup_password": true,
+  "max_upload_mb": 100,
+  "database": {
+    "driver": "postgresql",
+    "host": "replace-me.pg.rds.aliyuncs.com",
+    "port": 5432,
+    "database": "octop",
+    "user": "octop",
+    "password": "replace-me"
+  }
+}

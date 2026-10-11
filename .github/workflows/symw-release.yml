@@ -1,0 +1,254 @@
+name: Build and deploy 生意喵 Octop release
+
+# 生意喵 (symw) production deploy. Upstream release workflows use v* tags;
+# this one only reacts to app-YYYYMMDD.N.
+on:
+  push:
+    tags:
+      - "app-20*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symw-octop-production-release
+  cancel-in-progress: false
+
+env:
+  BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate release tag
+        shell: bash
+        run: '[[ "$GITHUB_REF_NAME" =~ ^app-[0-9]{8}\.[0-9]+$ ]]'
+      - name: Validate deployment scripts
+        shell: bash
+        run: |
+          bash -n deploy/*.sh .github/scripts/symw_*.sh
+          python3 -m py_compile deploy/preflight.py deploy/tools/push_workspace.py
+          python3 -m json.tool deploy/config.json.example >/dev/null
+      - name: Validate Compose configuration
+        shell: bash
+        env:
+          OCTOP_IMAGE: registry.example.com/example/symw-octop@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          OCTOP_RELEASE: app-20261011.1
+        run: docker compose -f deploy/compose.yaml config --quiet
+
+  build-candidate:
+    runs-on: ubuntu-latest
+    environment: symw
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      short_sha: ${{ steps.metadata.outputs.short_sha }}
+    env:
+      IMAGE_REPOSITORY: ${{ vars.ACR_REGISTRY_PUBLIC }}/${{ vars.ACR_NAMESPACE }}/symw-octop
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Validate image configuration
+        shell: bash
+        env:
+          ACR_REGISTRY_PUBLIC: ${{ vars.ACR_REGISTRY_PUBLIC }}
+          ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          missing=()
+          for name in ACR_REGISTRY_PUBLIC ACR_NAMESPACE ACR_USERNAME ACR_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing GitHub environment configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.ACR_REGISTRY_PUBLIC }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: Compute image metadata
+        id: metadata
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::12}"
+          echo "short_sha=$short_sha" >>"$GITHUB_OUTPUT"
+          echo "candidate_tag=candidate-app-${short_sha}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_OUTPUT"
+      - name: Resolve existing commit image
+        id: existing
+        shell: bash
+        env:
+          SHORT_SHA: ${{ steps.metadata.outputs.short_sha }}
+        run: |
+          sha_ref="$IMAGE_REPOSITORY:app-sha-$SHORT_SHA"
+          existing_digest="$(docker buildx imagetools inspect "$sha_ref" \
+            --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+          if [[ -n "$existing_digest" ]]; then
+            if [[ ! "$existing_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "existing commit tag returned an invalid digest: tag=$sha_ref digest=$existing_digest" >&2
+              exit 1
+            fi
+            echo "reused=true" >>"$GITHUB_OUTPUT"
+            echo "digest=$existing_digest" >>"$GITHUB_OUTPUT"
+            echo "Reusing immutable commit image: $sha_ref@$existing_digest"
+          else
+            echo "reused=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Build and push candidate
+        id: build
+        if: steps.existing.outputs.reused != 'true'
+        uses: docker/bake-action@v6
+        with:
+          source: .
+          files: deploy/docker-bake.hcl
+          targets: symw
+          push: true
+          set: |
+            symw.tags=${{ env.IMAGE_REPOSITORY }}:${{ steps.metadata.outputs.candidate_tag }}
+            *.cache-from=type=gha,scope=symw-octop
+            *.cache-to=type=gha,mode=max,scope=symw-octop
+      - name: Resolve candidate digest
+        id: image
+        shell: bash
+        env:
+          REUSED: ${{ steps.existing.outputs.reused }}
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          CANDIDATE_REF: ${{ env.IMAGE_REPOSITORY }}:${{ steps.metadata.outputs.candidate_tag }}
+        run: |
+          if [[ "$REUSED" == "true" ]]; then
+            digest="$EXISTING_DIGEST"
+          else
+            digest="$(docker buildx imagetools inspect "$CANDIDATE_REF" \
+              --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          fi
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "candidate image digest is invalid: $digest" >&2
+            exit 1
+          fi
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+      - name: Scan candidate digest
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ secrets.ACR_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        with:
+          image-ref: ${{ env.IMAGE_REPOSITORY }}@${{ steps.image.outputs.digest }}
+          version: v0.70.0
+          scanners: vuln
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  deploy:
+    needs:
+      - test
+      - build-candidate
+    runs-on: ubuntu-latest
+    environment: symw
+    env:
+      IMAGE_REPOSITORY: ${{ vars.ACR_REGISTRY_PUBLIC }}/${{ vars.ACR_NAMESPACE }}/symw-octop
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Validate deployment configuration
+        shell: bash
+        env:
+          ACR_REGISTRY_PUBLIC: ${{ vars.ACR_REGISTRY_PUBLIC }}
+          ACR_REGISTRY_VPC: ${{ vars.ACR_REGISTRY_VPC }}
+          ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
+          ECS_REGION_ID: ${{ vars.ECS_REGION_ID }}
+          ECS_INSTANCE_ID: ${{ vars.ECS_INSTANCE_ID }}
+          CANDIDATE_DIGEST: ${{ needs.build-candidate.outputs.digest }}
+        run: |
+          missing=()
+          for name in \
+            ACR_REGISTRY_PUBLIC ACR_REGISTRY_VPC ACR_NAMESPACE \
+            ACR_USERNAME ACR_PASSWORD \
+            ALIBABA_CLOUD_ACCESS_KEY_ID ALIBABA_CLOUD_ACCESS_KEY_SECRET \
+            ECS_REGION_ID ECS_INSTANCE_ID CANDIDATE_DIGEST; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing GitHub environment configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          [[ "$GITHUB_REF_NAME" =~ ^app-[0-9]{8}\.[0-9]+$ ]]
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.ACR_REGISTRY_PUBLIC }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: Promote scanned digest
+        id: promote
+        shell: bash
+        env:
+          DIGEST: ${{ needs.build-candidate.outputs.digest }}
+          SHORT_SHA: ${{ needs.build-candidate.outputs.short_sha }}
+        run: |
+          source_ref="$IMAGE_REPOSITORY@$DIGEST"
+          release_ref="$IMAGE_REPOSITORY:$GITHUB_REF_NAME"
+          sha_ref="$IMAGE_REPOSITORY:app-sha-$SHORT_SHA"
+          tags_to_create=()
+          for target_ref in "$release_ref" "$sha_ref"; do
+            if existing_digest="$(docker buildx imagetools inspect "$target_ref" \
+              --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"')"; then
+              if [[ "$existing_digest" != "$DIGEST" ]]; then
+                echo "immutable tag already points to another digest: tag=$target_ref expected=$DIGEST actual=$existing_digest" >&2
+                exit 1
+              fi
+            else
+              tags_to_create+=(--tag "$target_ref")
+            fi
+          done
+          if (( ${#tags_to_create[@]} > 0 )); then
+            docker buildx imagetools create --prefer-index=false "${tags_to_create[@]}" "$source_ref"
+          fi
+          promoted_digest="$(docker buildx imagetools inspect "$release_ref" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          if [[ "$promoted_digest" != "$DIGEST" ]]; then
+            echo "promoted digest mismatch: expected=$DIGEST actual=$promoted_digest" >&2
+            exit 1
+          fi
+          echo "digest=$promoted_digest" >>"$GITHUB_OUTPUT"
+      - name: Install Alibaba Cloud CLI
+        run: |
+          curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz -o /tmp/aliyun-cli.tgz
+          tar -xzf /tmp/aliyun-cli.tgz -C /tmp
+          sudo install -m 0755 /tmp/aliyun /usr/local/bin/aliyun
+          aliyun version
+      - name: Deploy through Cloud Assistant
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
+          ALIBABA_CLOUD_REGION_ID: ${{ vars.ECS_REGION_ID }}
+          ECS_REGION_ID: ${{ vars.ECS_REGION_ID }}
+          ECS_INSTANCE_ID: ${{ vars.ECS_INSTANCE_ID }}
+          DEPLOY_IMAGE: ${{ vars.ACR_REGISTRY_VPC }}/${{ vars.ACR_NAMESPACE }}/symw-octop@${{ steps.promote.outputs.digest }}
+        run: .github/scripts/symw_run_cloud_assistant.sh "$DEPLOY_IMAGE" "$GITHUB_REF_NAME"
+      - name: Record release summary
+        if: always()
+        shell: bash
+        env:
+          DIGEST: ${{ steps.promote.outputs.digest }}
+          SHORT_SHA: ${{ needs.build-candidate.outputs.short_sha }}
+        run: |
+          {
+            echo "### 生意喵 Octop release"
+            echo
+            echo "- Release: \`$GITHUB_REF_NAME\`"
+            echo "- Commit tag: \`app-sha-$SHORT_SHA\`"
+            echo "- Deployed digest: \`${DIGEST:-unavailable}\`"
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,38 @@
+name: symw-octop
+
+services:
+  octop:
+    image: ${OCTOP_IMAGE:?OCTOP_IMAGE must be an immutable ACR digest}
+    container_name: symw-octop
+    network_mode: bridge
+    init: true
+    restart: unless-stopped
+    # The upstream entrypoint runs `octop init` whenever octop.db is missing,
+    # which is always true on PostgreSQL and crash-loops on the second boot.
+    # The first admin is created through the /setup wizard instead.
+    entrypoint: ["octop", "run", "--host", "0.0.0.0", "--port", "8088"]
+    # No OCTOP_DATABASE_* here: database settings live in .octop/config.json
+    # and env vars would override them.
+    environment:
+      OCTOP_RELEASE: ${OCTOP_RELEASE:?OCTOP_RELEASE must be set}
+      HOME: /data
+      OCTOP_BIND_HOST: 0.0.0.0
+      OCTOP_PORT: "8088"
+      OCTOP_ENABLE_DASHBOARD: "false"
+      TZ: Asia/Shanghai
+    volumes:
+      - /data/srv/octop/.octop:/data/.octop
+    ports:
+      - "127.0.0.1:8088:8088"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 8
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
