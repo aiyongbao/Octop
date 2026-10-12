@@ -1,0 +1,10 @@
+# Data-analysis libraries preinstalled for agents (pandas / matplotlib and the
+# transitive deps uv.lock does not already provide). Installed into /app/.venv
+# by deploy/Dockerfile and verified with `uv pip check`; resolved 2026-10-12
+# against uv.lock + security-overrides.txt (numpy 2.5.1, pillow 12.3.0).
+pandas==3.0.6
+matplotlib==3.11.2
+contourpy==1.4.0
+cycler==0.12.1
+fonttools==4.66.1
+kiwisolver==1.5.1

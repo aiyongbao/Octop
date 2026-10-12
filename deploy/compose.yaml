@@ -10,7 +10,19 @@ services:
     # The upstream entrypoint runs `octop init` whenever octop.db is missing,
     # which is always true on PostgreSQL and crash-loops on the second boot.
     # The first admin is created through the /setup wizard instead.
-    entrypoint: ["octop", "run", "--host", "0.0.0.0", "--port", "8088"]
+    # entrypoint.sh only prepares the agents' Python env at /data/pyenv; older
+    # images (rollback.sh reuses this file) lack it and run Octop directly.
+    entrypoint:
+      - sh
+      - -c
+      - '[ -x /opt/deployment/entrypoint.sh ] && exec /opt/deployment/entrypoint.sh "$$@"; exec "$$@"'
+      - entrypoint
+      - octop
+      - run
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8088"
     # No OCTOP_DATABASE_* here: database settings live in .octop/config.json
     # and env vars would override them.
     environment:
@@ -20,8 +32,14 @@ services:
       OCTOP_PORT: "8088"
       OCTOP_ENABLE_DASHBOARD: "false"
       TZ: Asia/Shanghai
+      # Agents' runtime `pip install` / `uv pip install`: PyPI times out from
+      # the ECS host, use the Aliyun mirror instead.
+      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+      UV_DEFAULT_INDEX: https://mirrors.aliyun.com/pypi/simple/
     volumes:
       - /data/srv/octop/.octop:/data/.octop
+      # Agents' Python env (deploy/entrypoint.sh); survives image upgrades.
+      - /data/srv/octop/pyenv:/data/pyenv
     ports:
       - "127.0.0.1:8088:8088"
     healthcheck:

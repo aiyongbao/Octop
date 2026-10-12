@@ -1,0 +1,4 @@
+# Render Chinese chart labels with the image's fonts-noto-cjk instead of tofu.
+font.family: sans-serif
+font.sans-serif: Noto Sans CJK SC, DejaVu Sans
+axes.unicode_minus: False

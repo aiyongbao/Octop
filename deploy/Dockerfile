@@ -13,5 +13,18 @@ RUN uv pip install --python /app/.venv/bin/python --no-cache -r /tmp/security-ov
     && uv pip check --python /app/.venv/bin/python \
     && rm -rf /data/.cache/uv /tmp/security-overrides.txt
 
+# Data-analysis libraries agents use (see agent-packages.txt). Installed into
+# Octop's venv so the agent env in /data/pyenv (deploy/entrypoint.sh) sees them.
+COPY deploy/agent-packages.txt /tmp/agent-packages.txt
+RUN uv pip install --python /app/.venv/bin/python --no-cache -r /tmp/agent-packages.txt \
+    && uv pip check --python /app/.venv/bin/python \
+    && rm -rf /data/.cache/uv /tmp/agent-packages.txt
+
 COPY deploy/ /opt/deployment/
 RUN chmod 0755 /opt/deployment/*.sh
+
+# Agents' persistent Python env (created by entrypoint.sh) wins on PATH, so
+# their `python3` / `pip` stay consistent; it is absent in one-off containers
+# (e.g. deploy.sh preflight), which fall through to /app/.venv as before.
+ENV PATH="/data/pyenv/bin:$PATH" \
+    MATPLOTLIBRC=/opt/deployment/matplotlibrc
