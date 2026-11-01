@@ -69,6 +69,39 @@ def _project_harness_chunk(
         "request_seq": request_seq,
     }
 
+    if ctype == "subagent_event":
+        # Keep only observer-owned metadata: no callback inputs, outputs or errors.
+        payload = {
+            key: chunk[key]
+            for key in (
+                "execution_id",
+                "run_id",
+                "parent_run_id",
+                "parent_call_id",
+                "name",
+                "phase",
+                "started_at",
+                "tool_run_id",
+                "tool_call_id",
+                "tool_name",
+                "model_run_id",
+                "duration_ms",
+                "agent_id",
+            )
+            if key in chunk
+        }
+        phase = str(payload.get("phase") or "unknown")
+        return [
+            _event(
+                **common,
+                kind="subagent",
+                suffix=f"subagent:{payload.get('run_id')}:{seq}",
+                summary=str(payload.get("tool_name") or payload.get("name") or "task"),
+                payload=payload,
+                is_error=phase in {"failed", "tool_failed", "model_failed"},
+            )
+        ]
+
     if ctype == "tool_call_chunk":
         call_id = str(chunk.get("id") or chunk.get("index", 0))
         name = str(chunk.get("name") or "")

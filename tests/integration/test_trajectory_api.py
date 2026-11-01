@@ -534,3 +534,58 @@ async def test_live_sse_unsubscribes_on_cancel(env_alice_bob_agent: Any) -> None
 
     await asyncio.sleep(0.05)
     assert not bus._subscribers.get(thread_id)  # noqa: SLF001
+
+
+async def test_native_filtered_history_replay_and_permissions(
+    env_alice_bob_agent: Any, monkeypatch: Any
+) -> None:
+    client, srv, auth, other, agent = env_alice_bob_agent
+    thread = await _create_thread(client, auth, agent)
+    service = srv.app_runtime.trajectory_service
+    monkeypatch.setattr(trajectory_mod, "TRAJECTORY_SSE_REPLAY_MAX", 2)
+    for i in range(7):
+        service.observe_chunk(agent, thread, {"type": "user", "content": "unrelated"})
+        service.observe_chunk(
+            agent,
+            thread,
+            {
+                "type": "subagent_event",
+                "run_id": f"r{i}",
+                "name": "worker",
+                "phase": "completed",
+                "started_at": 1,
+                "duration_ms": 0,
+            },
+        )
+    response = await client.get(_url(agent, thread), params={"kinds": "subagent"}, headers=auth)
+    assert response.status_code == 200
+    expected = [row["event_id"] for row in response.json()["events"]]
+    assert len(expected) == 7
+    async with _open_asgi_sse(
+        client._octop_app,
+        _url(agent, thread, "/stream"),
+        auth,
+        params={"after_seq": 0, "kinds": "subagent"},
+    ) as stream:
+        blob = await _read_sse_until(
+            stream, predicate=lambda buf: len(_sse_event_payloads(buf, "event")) == 7
+        )
+    replay = _sse_event_payloads(blob, "event")
+    assert [row["event_id"] for row in replay] == expected
+    assert all(row["kind"] == "subagent" for row in replay)
+    assert not _sse_event_payloads(blob, "metrics")
+    denied = await client.get(_url(agent, thread), params={"kinds": "subagent"}, headers=other)
+    assert denied.status_code in (403, 404)
+    denied = await client.get(
+        _url(agent, thread, "/stream"), params={"kinds": "subagent"}, headers=other
+    )
+    assert denied.status_code in (403, 404)
+
+
+async def test_native_stream_filter_is_documented_in_openapi(env_alice_bob_agent: Any) -> None:
+    client, _srv, _auth, _other, _agent = env_alice_bob_agent
+    schema = client._octop_app.openapi()
+    route = schema["paths"]["/api/agents/{agent_id}/threads/{thread_id}/trajectory/stream"]["get"]
+    kinds = next(p for p in route["parameters"] if p["name"] == "kinds")
+    assert kinds["in"] == "query"
+    assert kinds["required"] is False

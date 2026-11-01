@@ -182,28 +182,37 @@ async def _iter_trajectory_sse(
     service: TrajectoryService,
     thread_id: str,
     after_seq: int | None,
+    kinds: list[str] | None = None,
 ) -> AsyncIterator[str]:
     bus = _live_bus(service)
-    queue = bus.subscribe(thread_id)
+    queue = bus.subscribe(thread_id, kinds=kinds)
     last_seq = _resume_after_seq(after_seq, request.headers.get("last-event-id"))
     try:
         if last_seq is not None:
-            replay = await asyncio.to_thread(
-                service.list_from_seq,
-                thread_id,
-                from_seq=last_seq,
-                limit=TRAJECTORY_SSE_REPLAY_MAX,
+            head = await asyncio.to_thread(
+                service.list_events, thread_id, before_seq=None, limit=1, kinds=None
             )
-            for event in replay:
-                payload = asdict(event)
-                event_seq = event.seq
-                # Re-emit ``seq == after_seq`` so a same-seq tool upsert that
-                # landed between REST history and this subscribe still reaches
-                # the browser (clients upsert by event_id). Newer seqs follow.
-                yield _sse_named("event", payload, sse_id=event_seq)
-                if event_seq > last_seq:
-                    last_seq = event_seq
-        yield await _metrics_frame(service, thread_id, refresh=True)
+            replay_head = head[-1].seq if head else last_seq
+            cursor = last_seq
+            while cursor <= replay_head:
+                replay = await asyncio.to_thread(
+                    service.list_from_seq,
+                    thread_id,
+                    from_seq=cursor,
+                    limit=TRAJECTORY_SSE_REPLAY_MAX,
+                )
+                if not replay:
+                    break
+                for event in replay:
+                    if event.seq > replay_head:
+                        break
+                    # Same-seq upserts remain replayable; clients upsert by ID.
+                    if kinds is None or event.kind in kinds:
+                        yield _sse_named("event", asdict(event), sse_id=event.seq)
+                    last_seq = max(last_seq, event.seq)
+                cursor = replay[-1].seq + 1
+        if kinds is None:
+            yield await _metrics_frame(service, thread_id, refresh=True)
         last_metrics_at = time.monotonic()
         while True:
             if await request.is_disconnected():
@@ -213,18 +222,26 @@ async def _iter_trajectory_sse(
             except TimeoutError:
                 yield format_sse("heartbeat", {})
                 continue
+            if bus.overflowed(queue):
+                # The browser reconnects from the last delivered seq and replays
+                # persisted events; never silently declare a partial timeline current.
+                yield format_sse("error", {"code": "replay_required"})
+                return
             seq = message.get("seq") if isinstance(message, dict) else None
             # Same-seq upserts (tool args→result) must reach the browser; only
             # drop strictly older frames that can appear after a replay race.
             if isinstance(seq, int) and last_seq is not None and seq < last_seq:
                 continue
             outgoing = _client_event_payload(message) if isinstance(message, dict) else message
-            yield _sse_named("event", outgoing, sse_id=seq if isinstance(seq, int) else None)
+            if kinds is None or (isinstance(message, dict) and message.get("kind") in kinds):
+                yield _sse_named("event", outgoing, sse_id=seq if isinstance(seq, int) else None)
             if isinstance(seq, int):
                 last_seq = seq
             force_metrics = isinstance(message, dict) and message.get("_final") is True
             now = time.monotonic()
-            if force_metrics or now - last_metrics_at >= TRAJECTORY_METRICS_PUSH_INTERVAL_S:
+            if kinds is None and (
+                force_metrics or now - last_metrics_at >= TRAJECTORY_METRICS_PUSH_INTERVAL_S
+            ):
                 yield await _metrics_frame(service, thread_id, refresh=force_metrics)
                 last_metrics_at = now
     except asyncio.CancelledError:
@@ -335,6 +352,9 @@ async def stream_thread_trajectory(
     after_seq: int | None = Query(
         default=None, description="Replay events with seq greater than this, then follow live."
     ),
+    kinds: str | None = Query(
+        default=None, description="Only emit these event kinds; omits metrics when set."
+    ),
     as_user: int | None = None,
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
@@ -353,6 +373,7 @@ async def stream_thread_trajectory(
             service=service,
             thread_id=thread_id,
             after_seq=after_seq,
+            kinds=_parse_kinds(kinds),
         ):
             yield frame
 

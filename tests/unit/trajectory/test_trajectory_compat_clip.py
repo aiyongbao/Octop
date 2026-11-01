@@ -106,3 +106,13 @@ def test_v2_archive_append_leaves_the_caller_event_intact(archive: HistoryArchiv
 
     assert len(event.summary) == _OVERSIZED_SUMMARY
     assert len(event.payload["content"]) == _OVERSIZED_CONTENT
+
+
+def test_v2_forward_replay_includes_boundary_and_respects_limit(archive: HistoryArchive) -> None:
+    from dataclasses import replace
+
+    archive.begin("A1", "T1")
+    store = ArchiveTrajectoryStore(archive)
+    for seq in range(1, 5):
+        store.append(replace(_oversized_event(f"e{seq}"), seq=seq, kind="subagent"))
+    assert [row.seq for row in store.list_from_seq("T1", from_seq=2, limit=2)] == [2, 3]

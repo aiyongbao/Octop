@@ -61,6 +61,8 @@ class TrajectoryService:
                     self._observe_assistant(event)
                 elif event.kind == "tool":
                     self._observe_tool(event)
+                elif event.kind == "subagent":
+                    self._commit_new(event)
                 else:
                     self._finalize_assistant(event.thread_id)
                     self._commit_new(event)

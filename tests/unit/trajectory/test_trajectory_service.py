@@ -361,3 +361,33 @@ def test_list_from_seq_returns_inclusive_tail(tmp_path: Path) -> None:
     assert len(page) == 2
     replay = service.list_from_seq("T1", from_seq=page[1].seq, limit=10)
     assert [event.seq for event in replay] == [page[1].seq]
+
+
+def test_subagent_metadata_does_not_split_parent_text_or_persist_private_fields(
+    tmp_path: Path,
+) -> None:
+    service, _ = _service(tmp_path)
+    service.observe_chunk("A1", "T1", {"type": "user", "content": "sample"})
+    service.observe_chunk("A1", "T1", {"type": "token", "content": "before"})
+    service.observe_chunk(
+        "A1",
+        "T1",
+        {
+            "type": "subagent_event",
+            "run_id": "runtime",
+            "phase": "started",
+            "name": "worker",
+            "started_at": 1,
+            "input": "PRIVATE_INPUT",
+            "output": "PRIVATE_OUTPUT",
+            "thinking": "PRIVATE_THINKING",
+        },
+    )
+    service.observe_chunk("A1", "T1", {"type": "token", "content": "after"})
+    service.finish_turn("T1")
+    rows = service.list_events("T1", before_seq=None, limit=20, kinds=None)
+    assert len([row for row in rows if row.kind == "assistant"]) == 1
+    assert next(row for row in rows if row.kind == "assistant").payload["content"] == "beforeafter"
+    native = next(row for row in rows if row.kind == "subagent")
+    assert "PRIVATE" not in json.dumps(native.payload)
+    assert native.payload["run_id"] == "runtime"

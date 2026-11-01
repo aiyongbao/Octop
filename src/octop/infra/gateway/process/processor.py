@@ -193,6 +193,7 @@ class GlobalProcessor:
             thread_message_repo=thread_message_repo,
             gateway=gateway,
             hitl_coordinator=self._hitl,
+            observe_trajectory=self._observe_trajectory,
         )
 
     async def _begin_history(

@@ -75,7 +75,15 @@ _HOST_IDLE_POLL_SEC = 0.05
 _HOST_IDLE_WAIT_SEC = 45.0
 _MEMBER_HITL_WAIT_SEC = 30 * 60
 _RELAY_CHUNK_TYPES = frozenset(
-    {"token", "reasoning", "tool_call_chunk", "tool_result", "error", "attachment"}
+    {
+        "token",
+        "reasoning",
+        "tool_call_chunk",
+        "tool_result",
+        "error",
+        "attachment",
+        "subagent_event",
+    }
 )
 
 
@@ -96,6 +104,7 @@ _STREAM_SPEAKER_TYPES = frozenset(
         "hitl_required",
         "done",
         "custom",
+        "subagent_event",
     }
 )
 
@@ -142,6 +151,7 @@ class TeamManager:
         thread_message_repo: Any | None = None,
         gateway: Any | None = None,
         hitl_coordinator: Any | None = None,
+        observe_trajectory: Callable[..., None] | None = None,
     ) -> None:
         self._agent_manager = agent_manager
         self._thread_registry = thread_registry
@@ -149,6 +159,7 @@ class TeamManager:
         self._thread_message_repo = thread_message_repo
         self._gateway = gateway
         self._hitl = hitl_coordinator
+        self._observe_trajectory = observe_trajectory
         self._hitl_waiters: dict[str, asyncio.Future[list[dict[str, Any]]]] = {}
         self._peer_prompts: dict[tuple[str, str], tuple[str, str]] = {}
         self._live_host_replies: set[str] = set()
@@ -428,6 +439,16 @@ class TeamManager:
             room_open = True
 
         async def emit(chunk: dict[str, Any]) -> None:
+            if chunk.get("type") == "subagent_event":
+                # Metadata does not share the host's text accumulator. Publish
+                # immediately even while member prose waits for the host turn.
+                await self._relay_chunk(
+                    chunk,
+                    room_thread_id=room_thread_id,
+                    member_thread_id=member_tid,
+                    speaker_id=speaker_id,
+                )
+                return
             if hold_room and not room_open and self._host_turn_busy(host_id, room_thread_id):
                 await self._relay_chunk(
                     chunk,
@@ -1084,10 +1105,22 @@ class TeamManager:
         speaker_id: str,
         include_room: bool = True,
     ) -> None:
+        stamped = stamp_stream_speaker(chunk, speaker_id, include_done=True)
+        if chunk.get("type") == "subagent_event" and self._observe_trajectory is not None:
+            # Record in each authorized thread, not just on the transient room WS.
+            if include_room and room_thread_id:
+                owner = self._room_agent_id(room_thread_id)
+                if owner:
+                    self._observe_trajectory(
+                        agent_id=owner, thread_id=room_thread_id, chunk=stamped
+                    )
+            if member_thread_id and member_thread_id != room_thread_id:
+                self._observe_trajectory(
+                    agent_id=speaker_id, thread_id=member_thread_id, chunk=chunk
+                )
         hub = getattr(self._gateway, "ws_hub", None) if self._gateway is not None else None
         if hub is None:
             return
-        stamped = stamp_stream_speaker(chunk, speaker_id, include_done=True)
         piece = str(chunk.get("content") or "") if str(chunk.get("type") or "") == "token" else ""
         try:
             if include_room and room_thread_id:
@@ -1112,10 +1145,14 @@ class TeamManager:
         speaker_id: str,
     ) -> None:
         """Push one already-delivered member frame onto the room wall."""
+        stamped = stamp_stream_speaker(chunk, speaker_id, include_done=True)
+        if chunk.get("type") == "subagent_event" and self._observe_trajectory is not None:
+            owner = self._room_agent_id(room_thread_id)
+            if owner:
+                self._observe_trajectory(agent_id=owner, thread_id=room_thread_id, chunk=stamped)
         hub = getattr(self._gateway, "ws_hub", None) if self._gateway is not None else None
         if hub is None or not room_thread_id:
             return
-        stamped = stamp_stream_speaker(chunk, speaker_id, include_done=True)
         piece = str(chunk.get("content") or "") if str(chunk.get("type") or "") == "token" else ""
         try:
             async with self._member_wall_lock:

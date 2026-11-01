@@ -269,5 +269,17 @@ class HistoryStore:
             ).fetchall()
             return [self._decode(conn, json.loads(row[0])) for row in rows]
 
+    def event_page_after(self, thread_id: str, from_seq: int, limit: int) -> list[dict[str, Any]]:
+        """Read persisted v2 events in the forward order used by SSE catch-up."""
+        if not self.path.exists():
+            raise FileNotFoundError(self.path)
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT data FROM documents WHERE thread_id=? AND kind='event' "
+                "AND seq>=? ORDER BY seq ASC LIMIT ?",
+                (thread_id, from_seq, limit),
+            ).fetchall()
+            return [self._decode(conn, json.loads(row[0])) for row in rows]
+
     def close(self) -> None:
         self.db.close()
