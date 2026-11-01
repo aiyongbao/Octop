@@ -589,3 +589,55 @@ async def test_native_stream_filter_is_documented_in_openapi(env_alice_bob_agent
     kinds = next(p for p in route["parameters"] if p["name"] == "kinds")
     assert kinds["in"] == "query"
     assert kinds["required"] is False
+
+
+async def test_subagent_tool_detail_preview_and_owner_checked_full_text(
+    env_alice_bob_agent: Any,
+) -> None:
+    from octop.infra.agents.tool_event_details import tool_detail_fields
+
+    client, srv, auth, other, agent = env_alice_bob_agent
+    thread = await _create_thread(client, auth, agent)
+    service = srv.app_runtime.trajectory_service
+    command = "python3 --version\n" + "x" * 4000
+    service.observe_chunk(
+        agent,
+        thread,
+        {
+            "type": "subagent_event",
+            "run_id": "worker",
+            "tool_run_id": "operation",
+            "name": "worker",
+            "phase": "tool_completed",
+            "started_at": 1,
+            **tool_detail_fields("args", {"command": command, "api_key": "dummy_private"}),
+            **tool_detail_fields("result", "Python 3.12.15\nEXIT 0"),
+        },
+    )
+    response = await client.get(_url(agent, thread), params={"kinds": "subagent"}, headers=auth)
+    event = response.json()["events"][0]
+    assert event["payload"]["args_preview_truncated"] is True
+    assert len(event["payload"]["args"]) < 2100
+    assert "dummy_private" not in response.text
+    event_id = event["event_id"]
+    full = await client.get(_url(agent, thread, f"/events/{event_id}"), headers=auth)
+    assert full.status_code == 200
+    assert len(full.json()["payload"]["args"]) > 4000
+    assert full.json()["payload"]["args_redacted"] is True
+    assert full.json()["payload"]["result"] == "Python 3.12.15\nEXIT 0"
+    assert "dummy_private" not in full.text
+    denied = await client.get(_url(agent, thread, f"/events/{event_id}"), headers=other)
+    assert denied.status_code in (403, 404)
+    async with _open_asgi_sse(
+        client._octop_app,
+        _url(agent, thread, "/stream"),
+        auth,
+        params={"after_seq": 0, "kinds": "subagent"},
+    ) as stream:
+        blob = await _read_sse_until(
+            stream, predicate=lambda buf: bool(_sse_event_payloads(buf, "event"))
+        )
+    replay = _sse_event_payloads(blob, "event")[0]
+    assert replay["payload"]["args_preview_truncated"] is True
+    assert len(replay["payload"]["args"]) < 2100
+    assert "dummy_private" not in blob

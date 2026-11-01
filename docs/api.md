@@ -238,7 +238,8 @@ plugin returns a large `octop_ui` payload, the backend offloads the envelope's
 
 Native subagent events use `kind="subagent"`. Payloads contain runtime IDs,
 parent run/call IDs, agent/tool names, phase, start time and measured duration;
-they exclude callback inputs, outputs, reasoning and raw errors. Collection
+bounded, rule-redacted tool submissions/returns are available as `args`/`result`.
+Reasoning, message metadata and non-text artifacts are excluded. Collection
 respects `enable_trajectory=false`. Team events retain the member identity in
 the payload and are stored under each authorized destination thread.
 
@@ -249,6 +250,16 @@ clients deduplicate by event ID. A filtered subscriber that overflows receives
 an `error` event with `code="replay_required"` and should reconnect from its
 last received sequence. An ended tool or subagent indicates a returned call,
 not acceptance of the business result.
+
+Subagent `args` and `result` are text snapshots, captured before live fan-out
+and persistence, with `*_redacted` and `*_truncated` flags. Each is capped at
+64,000 characters with depth/node/scan limits; known sensitive fields, credential
+patterns and environment/configuration dumps are hidden. These are rule-based
+protections, not a general secret classifier. History and SSE return 2,000-character
+previews with `*_preview_truncated`; the existing owner-checked event detail route
+returns the stored bounded snapshot. An absent field means it was not recorded;
+`""`, `"null"` and `"{}"` represent different actual tool values. Historical
+metadata-only events are not backfilled.
 
 
 ## Channels

@@ -126,6 +126,8 @@ def _summarize_event(event: TrajectoryEvent) -> dict[str, Any]:
             continue
         if key in _LIST_CLIP_PAYLOAD_KEYS:
             summarized[key] = _clip_list_payload_value(value)
+            if event.kind == "subagent" and summarized[key] != value:
+                summarized[f"{key}_preview_truncated"] = True
         else:
             summarized[key] = value
     data["payload"] = summarized
@@ -173,6 +175,17 @@ async def _metrics_frame(
 def _client_event_payload(message: dict[str, Any]) -> dict[str, Any]:
     outgoing = dict(message)
     outgoing.pop("_final", None)
+    if outgoing.get("kind") == "subagent":
+        # Live history uses the same small preview as REST. Full bounded text
+        # remains available via the existing owner-checked event detail endpoint.
+        payload = dict(outgoing.get("payload") or {})
+        for key in _LIST_CLIP_PAYLOAD_KEYS:
+            if key in payload:
+                preview = _clip_list_payload_value(payload[key])
+                if preview != payload[key]:
+                    payload[f"{key}_preview_truncated"] = True
+                payload[key] = preview
+        outgoing["payload"] = payload
     return outgoing
 
 
@@ -208,7 +221,9 @@ async def _iter_trajectory_sse(
                         break
                     # Same-seq upserts remain replayable; clients upsert by ID.
                     if kinds is None or event.kind in kinds:
-                        yield _sse_named("event", asdict(event), sse_id=event.seq)
+                        yield _sse_named(
+                            "event", _client_event_payload(asdict(event)), sse_id=event.seq
+                        )
                     last_seq = max(last_seq, event.seq)
                 cursor = replay[-1].seq + 1
         if kinds is None:

@@ -29,7 +29,7 @@ class _Model(FakeMessagesListChatModel):
     def _generate(self, *args: Any, **kwargs: Any) -> Any:
         self.calls += 1
         if self.fail and self.calls == 2:
-            raise RuntimeError("private-exception-content")
+            raise RuntimeError("sample-exception-content")
         return super()._generate(*args, **kwargs)
 
 
@@ -68,7 +68,7 @@ def _graph(
                         }
                     ],
                 ),
-                AIMessage(content="private-child-answer"),
+                AIMessage(content="sample-child-answer"),
             ],
         )
         models.append(model)
@@ -87,7 +87,7 @@ def _graph(
                 "id": f"dispatch-{i}",
                 "name": "task",
                 "args": {
-                    "description": "private-task-instructions",
+                    "description": "sample-task-instructions",
                     "subagent_type": f"worker-{i}",
                 },
             }
@@ -127,15 +127,18 @@ async def test_native_parallel_tools_are_scoped_and_models_execute_once() -> Non
     assert len([e for e in events if e["phase"] == "model_started"]) == 4
     assert [model.calls for model in models] == [2, 2, 2]
     assert all(e["started_at"] <= e["ts"] for e in events)
-    assert "private-" not in json.dumps(events)
     assert all(e["duration_ms"] >= 0 for e in events if "duration_ms" in e)
+    returned = [e for e in events if e["phase"] == "tool_completed"]
+    assert sorted(int(e["result"]) for e in returned) == [5, 6]
+    assert sorted(json.loads(e["args"])["a"] for e in returned) == [2, 3]
+    assert all("sample-child-answer" in e["result"] for e in events if e["phase"] == "completed")
 
 
 @pytest.mark.asyncio
 async def test_failure_is_published_before_original_exception() -> None:
     graph, models, _, _ = _graph(fail=True)
     events = []
-    with pytest.raises(RuntimeError, match="private-exception-content"):
+    with pytest.raises(RuntimeError, match="sample-exception-content"):
         async for event in merge_subagent_events(
             LangGraphProtocol(graph=graph).stream(
                 [HumanMessage(content="sample")], {"callbacks": [SubagentEventObserver()]}
@@ -145,7 +148,6 @@ async def test_failure_is_published_before_original_exception() -> None:
                 events.append(event)
     assert any(e["phase"] == "failed" for e in events)
     assert models[-1].calls == 1
-    assert "private-" not in json.dumps(events)
 
 
 @pytest.mark.asyncio
@@ -272,7 +274,7 @@ async def test_manager_wires_observer_without_replacing_callbacks(
                 run_id=child,
                 parent_run_id=root,
             )
-            await observer.on_tool_end("private-result", run_id=child)
+            await observer.on_tool_end("sample-result", run_id=child)
             await observer.on_chain_end({}, run_id=root)
         yield {"type": "token", "content": "parent"}
 
@@ -301,3 +303,50 @@ async def test_manager_wires_observer_without_replacing_callbacks(
     assert len([chunk for chunk in result if chunk["type"] == "subagent_event"]) == (
         2 if enabled else 0
     )
+
+
+@pytest.mark.asyncio
+async def test_tool_errors_and_command_error_reply_keep_the_actual_submission_and_return() -> None:
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    observer = SubagentEventObserver()
+    root, dispatch, invalid, error_reply = uuid4(), uuid4(), uuid4(), uuid4()
+
+    async def source() -> AsyncIterator[dict[str, Any]]:
+        await observer.on_chain_start({}, {}, run_id=root)
+        await observer.on_tool_start({"name": "task"}, "", run_id=dispatch, parent_run_id=root)
+        await observer.on_tool_start(
+            {"name": "execute"}, "", inputs={}, run_id=invalid, parent_run_id=dispatch
+        )
+        await observer.on_tool_error(ValueError("command: Field required"), run_id=invalid)
+        await observer.on_tool_start(
+            {"name": "execute"},
+            "",
+            inputs={"command": "python3 --version"},
+            run_id=error_reply,
+            parent_run_id=dispatch,
+            tool_call_id="call",
+        )
+        await observer.on_tool_end(
+            Command(
+                update={
+                    "messages": [
+                        ToolMessage(content="actual failure", status="error", tool_call_id="call"),
+                        ToolMessage(content="wrong result", tool_call_id="other"),
+                    ]
+                }
+            ),
+            run_id=error_reply,
+        )
+        await observer.on_tool_end("returned", run_id=dispatch)
+        await observer.on_chain_end({}, run_id=root)
+        yield {"type": "done"}
+
+    events = [event async for event in merge_subagent_events(source())]
+    failed = [e for e in events if e.get("phase") == "tool_failed"]
+    assert len(failed) == 2
+    assert failed[0]["args"] == "{}"
+    assert failed[0]["result"] == "command: Field required"
+    assert failed[1]["result"] == "actual failure"
+    assert "wrong result" not in json.dumps(events)

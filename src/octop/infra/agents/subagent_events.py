@@ -18,6 +18,12 @@ from uuid import UUID
 from langchain_core.callbacks import AsyncCallbackHandler
 from langgraph.errors import GraphInterrupt
 
+from octop.infra.agents.tool_event_details import (
+    sensitive_tool_source,
+    tool_detail_fields,
+    tool_reply,
+)
+
 _Sink = Callable[[dict[str, Any]], Awaitable[None]]
 _sink: ContextVar[_Sink | None] = ContextVar("subagent_event_sink", default=None)
 
@@ -30,6 +36,8 @@ class _Run:
     started: float
     started_at: float = field(default_factory=time.time)
     terminal: bool = False
+    details: dict[str, Any] = field(default_factory=dict)
+    hide_output: bool = False
 
 
 def _error_phase(error: BaseException) -> str:
@@ -41,7 +49,7 @@ def _error_phase(error: BaseException) -> str:
 
 
 class SubagentEventObserver(AsyncCallbackHandler):
-    """Record identities, names and timings only; never capture inputs or outputs."""
+    """Record native activity plus bounded, rule-redacted tool submissions/returns."""
 
     def __init__(self) -> None:
         self._parents: dict[str, str | None] = {}
@@ -77,12 +85,18 @@ class SubagentEventObserver(AsyncCallbackHandler):
             }
         )
 
-    async def _finish(self, run_id: str, phase: str) -> None:
+    async def _finish(self, run_id: str, phase: str, **fields: Any) -> None:
         run = self._agents[run_id]
         if run.terminal:
             return
         run.terminal = True
-        await self._emit(run_id, phase, duration_ms=(time.monotonic() - run.started) * 1000)
+        await self._emit(
+            run_id,
+            phase,
+            **run.details,
+            **fields,
+            duration_ms=(time.monotonic() - run.started) * 1000,
+        )
 
     async def on_chain_start(
         self,
@@ -183,6 +197,11 @@ class SubagentEventObserver(AsyncCallbackHandler):
         call_id = kwargs.get("tool_call_id")
         call_id = call_id if isinstance(call_id, str) else None
         owner = self._owner(parent)
+        if name != "task" and owner is None:
+            return
+        raw_args = inputs if inputs is not None else input_str
+        hide_output = sensitive_tool_source(raw_args)
+        details = tool_detail_fields("args", raw_args, hidden=hide_output)
         if name == "task":
             agent_name = (inputs or {}).get("subagent_type")
             self._agents[identity] = _Run(
@@ -190,17 +209,26 @@ class SubagentEventObserver(AsyncCallbackHandler):
                 call_id=call_id,
                 parent=owner,
                 started=time.monotonic(),
+                details=details,
+                hide_output=hide_output,
             )
-            await self._emit(identity, "started")
+            await self._emit(identity, "started", **details)
         elif owner is not None:
-            self._tools[identity] = _Run(name, call_id, owner, time.monotonic())
+            self._tools[identity] = _Run(
+                name, call_id, owner, time.monotonic(), details=details, hide_output=hide_output
+            )
             await self._emit(
-                owner, "tool_started", tool_run_id=identity, tool_call_id=call_id, tool_name=name
+                owner,
+                "tool_started",
+                tool_run_id=identity,
+                tool_call_id=call_id,
+                tool_name=name,
+                **details,
             )
 
-    async def _tool_terminal(self, identity: str, phase: str) -> None:
+    async def _tool_terminal(self, identity: str, phase: str, **fields: Any) -> None:
         if identity in self._agents:
-            await self._finish(identity, phase)
+            await self._finish(identity, phase, **fields)
         elif identity in self._tools:
             tool = self._tools.pop(identity)
             assert tool.parent is not None
@@ -210,17 +238,28 @@ class SubagentEventObserver(AsyncCallbackHandler):
                 tool_run_id=identity,
                 tool_call_id=tool.call_id,
                 tool_name=tool.name,
+                **tool.details,
+                **fields,
                 duration_ms=(time.monotonic() - tool.started) * 1000,
             )
 
     async def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        run = self._agents.get(str(run_id)) or self._tools.get(str(run_id))
+        output = tool_reply(output, run.call_id) if run else output
         status = (
             output.get("status") if isinstance(output, dict) else getattr(output, "status", None)
         )
-        await self._tool_terminal(str(run_id), "failed" if status == "error" else "completed")
+        details = tool_detail_fields("result", output, hidden=run.hide_output) if run else {}
+        await self._tool_terminal(
+            str(run_id), "failed" if status == "error" else "completed", **details
+        )
 
     async def on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        await self._tool_terminal(str(run_id), _error_phase(error))
+        run = self._agents.get(str(run_id)) or self._tools.get(str(run_id))
+        details = {}
+        if run is not None and _error_phase(error) == "failed":
+            details = tool_detail_fields("result", str(error), hidden=run.hide_output)
+        await self._tool_terminal(str(run_id), _error_phase(error), **details)
 
 
 async def merge_subagent_events(
