@@ -67,8 +67,11 @@ export function useChatComposerResources(
       ? expert.bridge_connection_id
       : null;
   const remoteBridge = Boolean(bridgeConnectionId);
-  const expertMcpServers = teamHost || remoteBridge ? [] : expert?.mcp_servers;
+  // Peer experts carry the same composer defaults as local ones (mapped onto
+  // the shadow row). Team hosts still have no connectors.
+  const expertMcpServers = teamHost ? [] : expert?.mcp_servers;
   const expertKnowledgeBaseIds = expert?.knowledge_base_ids;
+  const expertDefaultModel = (expert?.default_model || "").trim() || null;
   const expertMcpKey = (expertMcpServers ?? []).join("\0");
   const expertKbKey = (expertKnowledgeBaseIds ?? []).join("\0");
   const isNewSession = !activeThreadId || isPendingThread(activeThreadId);
@@ -133,19 +136,26 @@ export function useChatComposerResources(
     if (isNewSession) composerTouchedRef.current = false;
   }, [isNewSession]);
 
-  // Auto = omit turn model; backend applies the expert default.
+  // No thread override: show the expert default. A local account preference
+  // fills Auto only for experts on this Octop. A remote Auto stays unset so
+  // the turn omits ``model`` and the peer resolves its own default.
   useEffect(() => {
     const local = activeThreadId
       ? conversationOverrides[activeThreadId]
       : undefined;
+    const autoFallback = remoteBridge ? null : preferredModel;
     setSelectedModel(
-      local ? local.model : stickyModel || preferredModel || null,
+      local
+        ? local.model
+        : stickyModel || expertDefaultModel || autoFallback || null,
     );
   }, [
     resolvedAgentId,
     activeThreadId,
     stickyModel,
+    expertDefaultModel,
     preferredModel,
+    remoteBridge,
     conversationOverrides,
   ]);
 
@@ -212,7 +222,12 @@ export function useChatComposerResources(
         .then((instances) => {
           if (cancelled) return;
           const options = (instances ?? [])
-            .filter((i) => i.status === "active" && i.has_credentials)
+            .filter(
+              (i) =>
+                i.status === "active" &&
+                i.has_credentials &&
+                i.usable !== false,
+            )
             .map((i) => ({
               mcp_server_name: i.mcp_server_name,
               label:

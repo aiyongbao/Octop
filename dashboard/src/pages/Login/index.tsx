@@ -16,6 +16,7 @@ import {
   type OauthProviderStatus,
 } from "../../api/modules/auth";
 import { apiErrorMessage } from "../../utils/apiError";
+import { publicUrl } from "../../utils/publicUrl";
 import { refreshServerLabels } from "../../i18n";
 import { applyUserLocale, applyGuestLocale } from "../../utils/locale";
 import { useTheme } from "../../context/ThemeContext";
@@ -271,7 +272,9 @@ export default function LoginPage() {
       >
         <img
           src={
-            isDark ? "/logo_horizontal_white.png" : "/logo_horizontal_dark.png"
+            isDark
+              ? publicUrl("logo_horizontal_white.png")
+              : publicUrl("logo_horizontal_dark.png")
           }
           alt="Octop"
           style={{
@@ -295,31 +298,17 @@ export default function LoginPage() {
           {t("login.title")}
         </h2>
 
-        <div style={{ width: "100%" }}>
-          <Input
-            prefix={
-              <User size={16} style={{ color: "var(--fn-text-quaternary)" }} />
-            }
-            placeholder={t("login.username")}
-            size="large"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoFocus
-            aria-describedby="login-username-hint"
-            style={{ borderRadius: 10 }}
-          />
-          <div
-            id="login-username-hint"
-            style={{
-              marginTop: 6,
-              fontSize: 12,
-              color: "var(--fn-text-tertiary)",
-              lineHeight: 1.4,
-            }}
-          >
-            {t("login.usernameHint")}
-          </div>
-        </div>
+        <Input
+          prefix={
+            <User size={16} style={{ color: "var(--fn-text-quaternary)" }} />
+          }
+          placeholder={t("login.username")}
+          size="large"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          autoFocus
+          style={{ borderRadius: 10 }}
+        />
 
         <Input.Password
           prefix={

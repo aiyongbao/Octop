@@ -44,8 +44,11 @@ import {
   formatAgentError,
   isAgentModelConfigError,
 } from "../../../utils/agentError";
+import { apiErrorMessage } from "../../../utils/apiError";
 import styles from "../index.module.less";
 import RemoteExpertHint from "../../Chat/components/RemoteExpertHint";
+import { expertDeleteConfirm } from "../../../utils/remoteExpert";
+import { SharedResourceBadge } from "../../../components/SharedResourceBadge";
 import { isSharedExpertViewer } from "../../../utils/sharedExpert";
 import type { PublishedExpert } from "../../../api/modules/publishedExperts";
 import PublishTemplateButton from "./PublishTemplateButton";
@@ -214,11 +217,15 @@ export default function AgentExpertsTable({
           onStateChange(agent.agent_id, "stopping");
           message.success(t("experts.agentStopped", { name: agent.name }));
         }
-      } catch {
+      } catch (error) {
         message.error(
-          checked
-            ? t("experts.agentStartFailed")
-            : t("experts.agentStopFailed"),
+          apiErrorMessage(
+            error,
+            checked
+              ? t("experts.agentStartFailed")
+              : t("experts.agentStopFailed"),
+            t,
+          ),
         );
       } finally {
         setActionLoadingId(null);
@@ -310,15 +317,11 @@ export default function AgentExpertsTable({
             />
           </span>
           <span className={styles.tableNameText}>{name}</span>
-          {row.is_shared && (
-            <Tag color="blue">
-              {isSharedExpertViewer(row)
-                ? t("experts.share.fromOwner", {
-                    name: row.owner_username,
-                  })
-                : t("experts.share.badge")}
-            </Tag>
-          )}
+          <SharedResourceBadge
+            shared={row.is_shared}
+            owned={!isSharedExpertViewer(row)}
+            ownerName={row.owner_username}
+          />
           <RemoteExpertHint agent={row} />
         </div>
       ),
@@ -434,6 +437,7 @@ export default function AgentExpertsTable({
         const isTransient = TRANSIENT.has(state);
         const chatReady = isAgentChatReady(state);
         const isOwner = row.is_owner !== false;
+        const deleteConfirm = expertDeleteConfirm(row, t);
         return (
           <div className={styles.tableActions}>
             {isOwner && (
@@ -478,8 +482,8 @@ export default function AgentExpertsTable({
                   </button>
                 </Tooltip>
                 <Popconfirm
-                  title={t("experts.confirmDelete", { name: row.name })}
-                  description={t("experts.confirmDeleteHint")}
+                  title={deleteConfirm.title}
+                  description={deleteConfirm.description}
                   onConfirm={() => void handleDelete(row)}
                   okText={t("common.delete", "Delete")}
                   cancelText={t("common.cancel")}

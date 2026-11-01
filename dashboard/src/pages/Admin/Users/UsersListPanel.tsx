@@ -42,6 +42,8 @@ import { ResizableTable } from "@/components/ResizableTable";
 import {
   Bot,
   Check,
+  ChevronDown,
+  ChevronRight,
   CircleHelp,
   Coins,
   IdCard,
@@ -73,6 +75,9 @@ import {
   type UserRole,
 } from "../../../api/modules/userRoles";
 import { authApi } from "../../../api/modules/auth";
+import { preferencesApi } from "../../../api/modules/preferences";
+import type { SidebarNavLayout } from "../../../layouts/sidebarNavLayout";
+import { buildPermissionPickerGroups } from "./permissionPickerLayout";
 import { useCardTableView } from "../../../hooks/useCardTableView";
 import { useSetCurrentUser } from "../../../hooks/useCurrentUser";
 import { useIsMobile } from "../../../hooks/useIsMobile";
@@ -144,6 +149,13 @@ export interface PolicyFormValues {
   max_agents?: number | null;
 }
 
+const DEFAULT_EXPERT_TEMPLATE_ID = "general-assistant";
+
+interface ExpertTemplateOption {
+  id: string;
+  label: string;
+}
+
 interface CreateValues extends PolicyFormValues {
   username: string;
   display_name?: string;
@@ -153,6 +165,8 @@ interface CreateValues extends PolicyFormValues {
   role: string;
   permissions?: string[];
   role_name?: string | null;
+  create_default_expert?: boolean;
+  expert_template_id?: string;
 }
 
 interface EditValues extends PolicyFormValues {
@@ -736,6 +750,62 @@ interface PermissionCheckboxPickerProps {
   disabled?: boolean;
 }
 
+function PermFoldHeader({
+  title,
+  titleClassName,
+  open,
+  disabled,
+  checkable,
+  checked,
+  indeterminate,
+  countLabel,
+  onToggle,
+  onCheck,
+}: {
+  title: string;
+  titleClassName: string;
+  open: boolean;
+  disabled?: boolean;
+  checkable: boolean;
+  checked: boolean;
+  indeterminate: boolean;
+  countLabel: string | null;
+  onToggle: () => void;
+  onCheck: (checked: boolean) => void;
+}) {
+  return (
+    <div className={styles.permFoldHeader}>
+      {checkable ? (
+        <Checkbox
+          checked={checked}
+          indeterminate={indeterminate}
+          disabled={disabled}
+          aria-label={title}
+          onChange={(e) => onCheck(e.target.checked)}
+        />
+      ) : null}
+      <button
+        type="button"
+        className={styles.permCollapseBtn}
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span className={styles.permChevron} aria-hidden>
+          {open ? (
+            <ChevronDown size={14} strokeWidth={2} />
+          ) : (
+            <ChevronRight size={14} strokeWidth={2} />
+          )}
+        </span>
+        <span className={titleClassName}>{title}</span>
+      </button>
+      {countLabel ? (
+        <span className={styles.permGroupCount}>{countLabel}</span>
+      ) : null}
+    </div>
+  );
+}
+
 export function PermissionCheckboxPicker({
   value,
   onChange,
@@ -745,51 +815,34 @@ export function PermissionCheckboxPicker({
   const { t } = useTranslation();
   const selected = value ?? [];
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const [navLayout, setNavLayout] = useState<SidebarNavLayout | null>(null);
+  const [navReady, setNavReady] = useState(false);
+  const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
-  const groups = useMemo(() => {
-    const order = [
-      {
-        category: "settings",
-        label: t("adminUsers.permGroupSettings"),
-      },
-      {
-        category: "control",
-        label: t("adminUsers.permGroupControl"),
-      },
-      {
-        category: "admin",
-        label: t("adminUsers.permGroupAdmin"),
-      },
-    ] as const;
-    return order
-      .map((g) => {
-        const items = catalog.filter((p) => p.category === g.category);
-        const pages: {
-          page: string;
-          label: string;
-          items: PermissionCatalogItem[];
-        }[] = [];
-        const standalone: PermissionCatalogItem[] = [];
-        for (const item of items) {
-          if (!item.page) {
-            standalone.push(item);
-            continue;
-          }
-          const existing = pages.find((p) => p.page === item.page);
-          if (existing) {
-            existing.items.push(item);
-          } else {
-            pages.push({
-              page: item.page,
-              label: item.page_label || item.page,
-              items: [item],
-            });
-          }
-        }
-        return { ...g, items, standalone, pages };
+  useEffect(() => {
+    let cancelled = false;
+    void preferencesApi
+      .get()
+      .then((prefs) => {
+        if (!cancelled) setNavLayout(prefs.sidebar_nav ?? null);
       })
-      .filter((g) => g.items.length > 0);
-  }, [catalog, t]);
+      .catch(() => {
+        // Keep the default groups when preferences cannot be loaded.
+      })
+      .finally(() => {
+        if (!cancelled) setNavReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const groups = useMemo(
+    () => buildPermissionPickerGroups(catalog, navLayout, t),
+    [catalog, navLayout, t],
+  );
 
   const toggle = (key: string, checked: boolean) => {
     if (disabled) return;
@@ -812,6 +865,15 @@ export function PermissionCheckboxPicker({
     onChange?.(selected.filter((k) => !drop.has(k)));
   };
 
+  const toggleCollapsed = (id: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   if (catalog.length === 0) {
     return (
       <div className={styles.permEmpty}>
@@ -820,6 +882,8 @@ export function PermissionCheckboxPicker({
     );
   }
 
+  if (!navReady) return null;
+
   return (
     <div
       className={`${styles.permPicker} ${
@@ -827,17 +891,43 @@ export function PermissionCheckboxPicker({
       }`}
     >
       {groups.map((group) => {
-        const keys = group.items.map((i) => i.key);
+        const keys = group.blocks.flatMap((block) =>
+          block.kind === "page"
+            ? block.items.map((item) => item.key)
+            : block.items.flatMap((chip) =>
+                chip.kind === "permission" ? [chip.item.key] : [],
+              ),
+        );
         const checkedCount = keys.filter((k) => selectedSet.has(k)).length;
         const allChecked = checkedCount === keys.length && keys.length > 0;
         const indeterminate = checkedCount > 0 && !allChecked;
-        const renderChips = (items: PermissionCatalogItem[]) => (
+        const renderChips = (
+          items: (
+            | { kind: "permission"; item: PermissionCatalogItem }
+            | { kind: "always"; key: string; label: string }
+          )[],
+        ) => (
           <div className={styles.permGrid} role="group">
-            {items.map((item) => {
+            {items.map((chip) => {
+              if (chip.kind === "always") {
+                return (
+                  <div
+                    key={chip.key}
+                    className={`${styles.permChip} ${styles.permChipAlways}`}
+                    title={t("adminUsers.permAlwaysOn")}
+                  >
+                    <span className={styles.permChipLabel}>{chip.label}</span>
+                    <span className={styles.permChipAlwaysTag}>
+                      {t("adminUsers.permAlwaysOn")}
+                    </span>
+                  </div>
+                );
+              }
+              const item = chip.item;
               const checked = selectedSet.has(item.key);
               return (
                 <button
-                  key={`${item.key}:${item.label}`}
+                  key={item.key}
                   type="button"
                   disabled={disabled}
                   aria-pressed={checked}
@@ -855,30 +945,36 @@ export function PermissionCheckboxPicker({
             })}
           </div>
         );
+        const groupOpen = !collapsedIds.has(group.id);
         return (
-          <section key={group.category} className={styles.permGroup}>
-            <div className={styles.permGroupHeader}>
-              <Checkbox
-                checked={allChecked}
-                indeterminate={indeterminate}
-                disabled={disabled}
-                onChange={(e) => setGroup(keys, e.target.checked)}
-              >
-                <span className={styles.permGroupTitle}>{group.label}</span>
-              </Checkbox>
-              <span className={styles.permGroupCount}>
-                {checkedCount}/{keys.length}
-              </span>
-            </div>
-            {group.pages.length === 0 ? (
-              renderChips(group.items)
-            ) : (
-              <>
-                {group.standalone.length > 0
-                  ? renderChips(group.standalone)
-                  : null}
-                {group.pages.map((page) => {
-                  const pageKeys = page.items.map((i) => i.key);
+          <section key={group.id} className={styles.permGroup}>
+            <PermFoldHeader
+              title={group.label}
+              titleClassName={styles.permGroupTitle}
+              open={groupOpen}
+              disabled={disabled}
+              checkable={keys.length > 0}
+              checked={allChecked}
+              indeterminate={indeterminate}
+              countLabel={
+                keys.length > 0 ? `${checkedCount}/${keys.length}` : null
+              }
+              onToggle={() => toggleCollapsed(group.id)}
+              onCheck={(checked) => setGroup(keys, checked)}
+            />
+            {groupOpen
+              ? group.blocks.map((block) => {
+                  if (block.kind === "chips") {
+                    const chipKey = block.items
+                      .map((chip) =>
+                        chip.kind === "always" ? chip.key : chip.item.key,
+                      )
+                      .join(",");
+                    return <div key={chipKey}>{renderChips(block.items)}</div>;
+                  }
+                  const pageId = `${group.id}:${block.id}`;
+                  const pageOpen = !collapsedIds.has(pageId);
+                  const pageKeys = block.items.map((item) => item.key);
                   const pageChecked = pageKeys.filter((k) =>
                     selectedSet.has(k),
                   ).length;
@@ -886,28 +982,36 @@ export function PermissionCheckboxPicker({
                     pageChecked === pageKeys.length && pageKeys.length > 0;
                   const pageIndeterminate = pageChecked > 0 && !pageAll;
                   return (
-                    <div key={page.page} className={styles.permPage}>
-                      <div className={styles.permPageHeader}>
-                        <Checkbox
-                          checked={pageAll}
-                          indeterminate={pageIndeterminate}
-                          disabled={disabled}
-                          onChange={(e) => setGroup(pageKeys, e.target.checked)}
-                        >
-                          <span className={styles.permPageTitle}>
-                            {page.label}
-                          </span>
-                        </Checkbox>
-                        <span className={styles.permGroupCount}>
-                          {pageChecked}/{pageKeys.length}
-                        </span>
-                      </div>
-                      {renderChips(page.items)}
+                    <div
+                      key={block.id}
+                      className={`${styles.permPage} ${
+                        pageOpen ? "" : styles.permPageCollapsed
+                      }`}
+                    >
+                      <PermFoldHeader
+                        title={block.title}
+                        titleClassName={styles.permPageTitle}
+                        open={pageOpen}
+                        disabled={disabled}
+                        checkable={pageKeys.length > 0}
+                        checked={pageAll}
+                        indeterminate={pageIndeterminate}
+                        countLabel={`${pageChecked}/${pageKeys.length}`}
+                        onToggle={() => toggleCollapsed(pageId)}
+                        onCheck={(checked) => setGroup(pageKeys, checked)}
+                      />
+                      {pageOpen
+                        ? renderChips(
+                            block.items.map((item) => ({
+                              kind: "permission" as const,
+                              item,
+                            })),
+                          )
+                        : null}
                     </div>
                   );
-                })}
-              </>
-            )}
+                })
+              : null}
           </section>
         );
       })}
@@ -1223,7 +1327,7 @@ function UserLoginLock({
 }
 
 export default function UsersListPanel() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const setCurrentUser = useSetCurrentUser();
   const timeZone = useServerTimezone();
   const isMobile = useIsMobile();
@@ -1232,6 +1336,9 @@ export default function UsersListPanel() {
   const [rows, setRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [expertTemplates, setExpertTemplates] = useState<
+    ExpertTemplateOption[]
+  >([]);
   const [pendingUserAvatar, setPendingUserAvatar] = useState<File | null>(null);
   const [pendingUserIcon, setPendingUserIcon] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -1270,7 +1377,9 @@ export default function UsersListPanel() {
 
   const baselinePermissions = useMemo(
     () =>
-      permCatalog.filter((p) => p.category === "settings").map((p) => p.key),
+      permCatalog
+        .filter((p) => p.category === "settings" || p.category === "nav")
+        .map((p) => p.key),
     [permCatalog],
   );
 
@@ -1624,6 +1733,30 @@ export default function UsersListPanel() {
       });
   }, [refreshAll]);
 
+  useEffect(() => {
+    if (!createOpen) return;
+    let cancelled = false;
+    const lang = i18n.language.startsWith("zh") ? "zh" : "en";
+    void request<Array<{ id: string; label: { zh: string; en: string } }>>(
+      "/experts",
+    )
+      .then((rows) => {
+        if (cancelled) return;
+        setExpertTemplates(
+          rows.map((row) => ({
+            id: row.id,
+            label: row.label?.[lang] || row.label?.en || row.id,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setExpertTemplates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [createOpen, i18n.language]);
+
   const onCreate = async (values: CreateValues) => {
     setSubmitting(true);
     try {
@@ -1638,6 +1771,10 @@ export default function UsersListPanel() {
           permissions: values.role === "admin" ? [] : values.permissions ?? [],
           role_name: values.role_name?.trim() || null,
           ...policyPayload(values, { workspaceRootAllowed }),
+          create_default_expert: Boolean(values.create_default_expert),
+          expert_template_id: values.create_default_expert
+            ? values.expert_template_id || DEFAULT_EXPERT_TEMPLATE_ID
+            : null,
         }),
       });
       if (pendingUserAvatar) {
@@ -1696,6 +1833,8 @@ export default function UsersListPanel() {
       token_quota: undefined,
       limit_max_agents: false,
       max_agents: undefined,
+      create_default_expert: true,
+      expert_template_id: DEFAULT_EXPERT_TEMPLATE_ID,
       ...(userRole ? policyFieldsFromRole(userRole, workspaceRootAllowed) : {}),
     });
     setPendingUserAvatar(null);
@@ -2299,6 +2438,8 @@ export default function UsersListPanel() {
             limit_workspace_root: false,
             limit_token_quota: false,
             limit_max_agents: false,
+            create_default_expert: true,
+            expert_template_id: DEFAULT_EXPERT_TEMPLATE_ID,
           }}
           className={styles.createUserForm}
         >
@@ -2432,6 +2573,61 @@ export default function UsersListPanel() {
                   </Form.Item>
                 );
               }}
+            </Form.Item>
+          </div>
+
+          <div className={styles.createSection}>
+            <div className={styles.createSectionTitle}>
+              {t("adminUsers.createSectionExpert")}
+            </div>
+            <Form.Item
+              label={t("adminUsers.createDefaultExpert")}
+              name="create_default_expert"
+              valuePropName="checked"
+              extra={t("adminUsers.createDefaultExpertHint")}
+            >
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              noStyle
+              shouldUpdate={(prev, cur) =>
+                prev.create_default_expert !== cur.create_default_expert
+              }
+            >
+              {({ getFieldValue }) =>
+                getFieldValue("create_default_expert") ? (
+                  <Form.Item
+                    label={t("adminUsers.expertTemplate")}
+                    name="expert_template_id"
+                    rules={[
+                      {
+                        required: true,
+                        message: t("adminUsers.expertTemplateRequired"),
+                      },
+                    ]}
+                  >
+                    <Select
+                      showSearch
+                      optionFilterProp="label"
+                      options={(expertTemplates.some(
+                        (item) => item.id === DEFAULT_EXPERT_TEMPLATE_ID,
+                      )
+                        ? expertTemplates
+                        : [
+                            {
+                              id: DEFAULT_EXPERT_TEMPLATE_ID,
+                              label: DEFAULT_EXPERT_TEMPLATE_ID,
+                            },
+                            ...expertTemplates,
+                          ]
+                      ).map((item) => ({
+                        value: item.id,
+                        label: item.label,
+                      }))}
+                    />
+                  </Form.Item>
+                ) : null
+              }
             </Form.Item>
           </div>
 

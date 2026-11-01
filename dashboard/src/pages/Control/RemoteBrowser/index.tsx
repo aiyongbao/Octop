@@ -907,18 +907,6 @@ export default function RemoteBrowserPage({
     [aiPanelHeight, aiPanelWidth, isMobile],
   );
 
-  const handleCanvasKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLCanvasElement>) => {
-      e.preventDefault();
-      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        sendEvent({ type: "type", text: e.key });
-      } else {
-        sendEvent({ type: "keydown", key: e.key });
-      }
-    },
-    [sendEvent],
-  );
-
   // --- Skill recording guide ---
   const [browserRecording, setBrowserRecording] = useState(false);
   const [browserRecordingId, setBrowserRecordingId] = useState<string | null>(
@@ -1295,24 +1283,18 @@ export default function RemoteBrowserPage({
   );
 
   const checkAction = {
-    label: (
-      <>
-        {t("remoteBrowser.checkInstallShort", "检查")}
-        {envReady && !envLoading ? (
-          <CheckCircle2
-            size={14}
-            style={{
-              marginLeft: 4,
-              color: "var(--fn-color-success,#52c41a)",
-              verticalAlign: "-2px",
-            }}
-          />
-        ) : null}
-      </>
-    ),
+    label: t("remoteBrowser.checkInstallShort", "检查"),
     onClick: openEnvModal,
-    icon: <Globe size={14} />,
-    type: "default" as const,
+    icon:
+      envReady && !envLoading ? (
+        <CheckCircle2
+          size={14}
+          style={{ color: "var(--fn-color-success,#52c41a)" }}
+        />
+      ) : (
+        <Globe size={14} />
+      ),
+    type: envReady ? ("default" as const) : ("primary" as const),
     title: t(
       "remoteBrowser.checkInstallTip",
       "检查本机是否已准备好浏览器，未安装时可一键安装",
@@ -1469,7 +1451,6 @@ export default function RemoteBrowserPage({
                       onOpenControls={openControlsDrawer}
                     />
                   }
-                  onCanvasKeyDown={handleCanvasKeyDown}
                   onFrameReadyChange={handleFrameReadyChange}
                 />
               </>
@@ -1608,7 +1589,7 @@ export default function RemoteBrowserPage({
       title={t("pageShell.browser.title", "浏览器 AI+")}
       subtitle={t(
         "pageShell.browser.subtitle",
-        "基于 Chromium 的无头浏览器会话",
+        "查看并操控远端无头浏览器，实时接管专家的网页操作",
       )}
       fill
     >
