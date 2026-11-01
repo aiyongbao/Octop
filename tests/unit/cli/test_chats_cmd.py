@@ -27,13 +27,15 @@ def test_chats_send_help_lists_mode() -> None:
 
 
 def test_chats_list_requires_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    import octop.cli.support.ctx as ctx_mod
+    import octop.cli.commands.chats as chats_mod
 
     def _missing(_agent: str | None) -> str:
         click.echo("error: --agent is required", err=True)
         raise SystemExit(2)
 
-    monkeypatch.setattr(ctx_mod, "require_agent", _missing)
+    # Patch the consumer after loading it: lazy import must not permanently
+    # capture the temporary replacement from support.ctx.
+    monkeypatch.setattr(chats_mod, "require_agent", _missing)
     runner = CliRunner()
     result = runner.invoke(cli, ["chats", "list"])
     assert result.exit_code == 2

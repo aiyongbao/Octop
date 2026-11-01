@@ -70,7 +70,7 @@ def _project_harness_chunk(
     }
 
     if ctype == "subagent_event":
-        # Keep only observer-owned metadata: no callback inputs, outputs or errors.
+        # Keep observer-owned fields only; tool details are bounded/redacted before queuing.
         payload = {
             key: chunk[key]
             for key in (
@@ -87,6 +87,12 @@ def _project_harness_chunk(
                 "model_run_id",
                 "duration_ms",
                 "agent_id",
+                "args",
+                "result",
+                "args_truncated",
+                "args_redacted",
+                "result_truncated",
+                "result_redacted",
             )
             if key in chunk
         }
