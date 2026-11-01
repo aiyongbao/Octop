@@ -10,7 +10,7 @@ import shutil
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -60,6 +60,7 @@ from octop.infra.agents.settings.runtime_limits import (
 from octop.infra.agents.settings.runtime_limits import (
     resolve_context_max_tokens as config_context_max_tokens,
 )
+from octop.infra.agents.subagent_events import SubagentEventObserver, merge_subagent_events
 from octop.infra.backend.docker_spec import (
     enrich_docker_backend_spec,
     inject_docker_global_environment,
@@ -77,6 +78,7 @@ from octop.infra.connectors.builder import (
 from octop.infra.connectors.service import ConnectorService
 from octop.infra.db.repos.audit import ACTOR_SYSTEM
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.history.trajectory.settings import agent_trajectory_enabled
 from octop.infra.skills.presentation import apply_skill_presentation, localize_skill_summary
 from octop.infra.skills.skill_package_store import SkillPackageStore
 from octop.infra.skills.workspace_catalog import (
@@ -1916,12 +1918,19 @@ class AgentManager:
         ):
             self._apply_pending_bootstrap_graph_refresh(agent_id)
             req = self._prepare_stream_request(agent_id, request)
+            observe_subagents = agent_trajectory_enabled(self.get_config(agent_id))
+            if observe_subagents:
+                req["callbacks"] = [*(req.get("callbacks") or []), SubagentEventObserver()]
             with (
                 hitl_thread_scope(thread_id_from_request(req)),
                 turn_model_scope(self._stream_model_label(agent_id, req, thread_id)),
             ):
-                async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
-                    yield chunk
+                chunks = self._harness_manager.stream(agent_id, cast(Any, req))
+                if observe_subagents:
+                    chunks = merge_subagent_events(chunks)
+                async with aclosing(chunks):
+                    async for chunk in chunks:
+                        yield chunk
             self._apply_pending_bootstrap_graph_refresh(agent_id)
 
     async def call(self, agent_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -1960,10 +1969,12 @@ class AgentManager:
                 hitl_thread_scope(thread_id),
                 turn_model_scope(self._stream_model_label(agent_id, {}, thread_id)),
             ):
-                async for chunk in self._harness_manager.resume_hitl(
-                    agent_id, thread_id, decisions
-                ):
-                    yield chunk
+                chunks = self._harness_manager.resume_hitl(agent_id, thread_id, decisions)
+                if agent_trajectory_enabled(self.get_config(agent_id)):
+                    chunks = merge_subagent_events(chunks)
+                async with aclosing(chunks):
+                    async for chunk in chunks:
+                        yield chunk
             self._apply_pending_bootstrap_graph_refresh(agent_id)
 
     def cancel_stream(self, agent_id: str, thread_id: str) -> None:

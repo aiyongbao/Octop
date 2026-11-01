@@ -11,6 +11,7 @@ TrajectoryKind = Literal[
     "compacted",
     "system",
     "unknown",
+    "subagent",
 ]
 
 

@@ -79,6 +79,16 @@ class ArchiveTrajectoryStore(TrajectoryStore):
             boundary = batch[-1]["seq"]
         return sorted([*rows, *new[:limit]], key=lambda event: event.seq)[-limit:]
 
+    def list_from_seq(self, thread_id: str, *, from_seq: int, limit: int) -> list[TrajectoryEvent]:
+        if limit <= 0:
+            return []
+        legacy = super().list_from_seq(thread_id, from_seq=from_seq, limit=limit)
+        current = [
+            event_from_dict(value)
+            for value in self.archive.store.event_page_after(thread_id, from_seq, limit)
+        ]
+        return sorted([*legacy, *current], key=lambda event: event.seq)[:limit]
+
     def get(self, event_id: str) -> TrajectoryEvent | None:
         value = self.archive.store.get_event(event_id)
         return event_from_dict(value) if value is not None else super().get(event_id)

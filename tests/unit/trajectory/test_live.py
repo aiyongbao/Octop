@@ -36,3 +36,18 @@ def test_slow_subscriber_keeps_only_latest_bounded_events() -> None:
         bus.publish("T1", {"seq": seq})
 
     assert [queue.get_nowait(), queue.get_nowait()] == [{"seq": 2}, {"seq": 3}]
+
+
+def test_filtered_subscriber_is_not_evicted_by_parent_tokens_and_reports_native_overflow() -> None:
+    bus = TrajectoryLiveBus(subscriber_queue_size=2)
+    queue = bus.subscribe("T", kinds=["subagent"])
+    bus.publish("T", {"kind": "subagent", "seq": 1})
+    for _ in range(500):
+        bus.publish("T", {"kind": "assistant"})
+    assert queue.qsize() == 1
+    assert not bus.overflowed(queue)
+    bus.publish("T", {"kind": "subagent", "seq": 2})
+    bus.publish("T", {"kind": "subagent", "seq": 3})
+    assert bus.overflowed(queue)
+    bus.unsubscribe("T", queue)
+    assert not bus.overflowed(queue)

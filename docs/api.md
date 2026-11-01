@@ -233,8 +233,23 @@ plugin returns a large `octop_ui` payload, the backend offloads the envelope's
 | `GET` | `/agents/{id}/threads/{thread_id}/trajectory` | owner | paginated event summaries; use `before_seq` for older rows |
 | `GET` | `/agents/{id}/threads/{thread_id}/trajectory/events/{event_id}` | owner | full event payload |
 | `GET` | `/agents/{id}/threads/{thread_id}/trajectory/metrics` | owner | aggregated turn, timing, and token metrics |
-| `GET` | `/agents/{id}/threads/{thread_id}/trajectory/stream` | owner | live SSE events; resume with `after_seq` or `Last-Event-ID` |
+| `GET` | `/agents/{id}/threads/{thread_id}/trajectory/stream` | owner | live SSE events; resume with `after_seq` or `Last-Event-ID`; optional `kinds=subagent` filters metadata events |
 | `GET` | `/agents/{id}/threads/{thread_id}/trajectory/export` | owner | full ledger download as JSONL (default) or JSON |
+
+Native subagent events use `kind="subagent"`. Payloads contain runtime IDs,
+parent run/call IDs, agent/tool names, phase, start time and measured duration;
+they exclude callback inputs, outputs, reasoning and raw errors. Collection
+respects `enable_trajectory=false`. Team events retain the member identity in
+the payload and are stored under each authorized destination thread.
+
+SSE `kinds` accepts a comma-separated list and omits metrics when supplied.
+Use `after_seq=0` after an empty initial history page. Resume replays retained
+events in forward batches, including the boundary sequence for tool upserts;
+clients deduplicate by event ID. A filtered subscriber that overflows receives
+an `error` event with `code="replay_required"` and should reconnect from its
+last received sequence. An ended tool or subagent indicates a returned call,
+not acceptance of the business result.
+
 
 ## Channels
 

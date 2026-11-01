@@ -1283,8 +1283,11 @@ async def test_member_tokens_stay_off_the_room_until_the_host_is_idle(
     gateway.ws_hub.subscribe("thr_parent~child", "conn-member")
     gateway.ws_hub.mark_turn_active("thr_parent")
     gate = asyncio.Event()
+    observed = MagicMock()
+    processor.teams._observe_trajectory = observed
 
     async def fake_stream(_agent_id: str, _request: dict[str, object]) -> object:
+        yield {"type": "subagent_event", "run_id": "live-child", "phase": "started"}
         yield {"type": "token", "content": "first"}
         await gate.wait()
         yield {"type": "token", "content": "second"}
@@ -1307,6 +1310,8 @@ async def test_member_tokens_stay_off_the_room_until_the_host_is_idle(
         await asyncio.sleep(0.01)
     assert any(frame.get("content") == "first" for frame in member_frames)
     assert not any(frame.get("type") == "token" for frame in room_frames)
+    assert len([f for f in room_frames if f.get("type") == "subagent_event"]) == 1
+    assert observed.call_count == 2  # room + member, before the parent turn is idle
     gateway.ws_hub.mark_turn_idle("thr_parent")
     gate.set()
     result = await task
@@ -1316,6 +1321,8 @@ async def test_member_tokens_stay_off_the_room_until_the_host_is_idle(
         frame.get("agent_id") == "child" for frame in room_frames if frame.get("type") == "token"
     )
     assert result["team_live_streamed"] is True
+    assert len([f for f in room_frames if f.get("type") == "subagent_event"]) == 1
+    assert observed.call_count == 2  # metadata is never buffered or written twice
 
 
 @pytest.mark.asyncio
@@ -2341,3 +2348,74 @@ def test_stamp_stream_speaker_sets_agent_alias() -> None:
     )
     assert member["agent_id"] == "doctor"
     assert member["agent"] == "doctor"
+
+
+@pytest.mark.asyncio
+async def test_native_subagent_relay_persists_member_and_buffered_room_once(
+    processor_env: dict,
+) -> None:
+    from octop.infra.db.repos.trajectory_events import TrajectoryEventRepo
+    from octop.infra.history.trajectory.live import TrajectoryLiveBus
+    from octop.infra.history.trajectory.service import TrajectoryService
+    from octop.infra.history.trajectory.store import TrajectoryStore
+
+    processor = processor_env["processor"]
+    registry = processor_env["gateway"].thread_registry
+    registry._threads.insert(
+        thread_id="thr_member",
+        agent_id="child",
+        user_id=1,
+        channel_type="dashboard",
+        session_key="member-sk",
+    )
+    service = TrajectoryService(
+        TrajectoryStore(TrajectoryEventRepo(registry._threads._db)),
+        TrajectoryLiveBus(),
+    )
+    processor._trajectory_service = service
+    chunk = {
+        "type": "subagent_event",
+        "ts": 100.0,
+        "run_id": "native-worker",
+        "name": "worker",
+        "started_at": 99.0,
+        "phase": "started",
+    }
+    # A buffered room frame is persisted in the member thread immediately,
+    # and in the host thread only when actually flushed onto the room wall.
+    await processor.teams._relay_chunk(
+        chunk,
+        room_thread_id="thr_parent",
+        member_thread_id="thr_member",
+        speaker_id="child",
+        include_room=False,
+    )
+    assert not service.list_events("thr_parent", before_seq=None, limit=10, kinds=None)
+    assert len(service.list_events("thr_member", before_seq=None, limit=10, kinds=None)) == 1
+    await processor.teams._push_room_frame(chunk, "thr_parent", "child")
+    room = service.list_events("thr_parent", before_seq=None, limit=10, kinds=None)
+    assert len(room) == 1
+    assert room[0].payload["agent_id"] == "child"
+    assert len(service.list_events("thr_member", before_seq=None, limit=10, kinds=None)) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_subagent_relay_respects_each_destination_optout(processor_env: dict) -> None:
+    processor = processor_env["processor"]
+    service = MagicMock()
+    processor._trajectory_service = service
+    original = processor._agent_repo.get
+    processor._agent_repo.get = lambda aid: SimpleNamespace(
+        config_json=json.dumps({"enable_trajectory": aid != "parent"}),
+    )
+    try:
+        await processor.teams._relay_chunk(
+            {"type": "subagent_event", "run_id": "r", "phase": "started"},
+            room_thread_id="thr_parent",
+            member_thread_id="thr_member",
+            speaker_id="child",
+        )
+    finally:
+        processor._agent_repo.get = original
+    assert service.observe_chunk.call_count == 1
+    assert service.observe_chunk.call_args.args[:2] == ("child", "thr_member")
