@@ -63,3 +63,32 @@ Deploy both the Octop projection/middleware and the gateway renderer. Installing
 only the renderer cannot create progress which the producer never published.
 Existing running tasks do not acquire the new middleware until the runtime is
 restarted; no running task should be interrupted just to preview the display.
+
+## Company GitHub Actions release
+
+The company `symw-release.yml` workflow builds on `app-YYYYMMDD.N` tags through
+`deploy/docker-bake.hcl`. The upstream runtime still installs its PyPI lock;
+`deploy/Dockerfile` then replaces only `octop-gateway` from the immutable company
+Git commit in `deploy/gateway-requirements.txt`. It does not follow a branch tip
+or resolve other runtime dependencies again. `uv pip check` must pass afterward.
+
+`deploy/gateway-source.json` records the repository, full commit, package version
+and hashes of all tracked package files, including the loading GIF. The build
+checks installed Git provenance, import location and every listed file; a wrong
+commit, registry fallback or missing asset fails the image build. The same
+manifest and verifier remain in `/opt/deployment` for read-only inspection:
+
+```sh
+/app/.venv/bin/python /opt/deployment/verify_gateway.py
+```
+
+To upgrade the fork, first review/accept the Gateway change, then update the
+requirement SHA and regenerate the manifest from that exact commit together in
+an Octop PR. A squash merge may produce a different accepted commit: update the
+pin accordingly before releasing. The initial pin references the Gateway card
+PR while these changes remain drafts; it is not production acceptance.
+Publish the approved Octop release tag through the existing workflow. Gateway
+pushes alone do not deploy Octop, and merging these drafts does not publish a
+release. Changing the pin changes the Octop commit and invalidates its immutable
+commit-image cache key. Runtime source patches are no longer needed for this
+Gateway version once the new image is deployed.

@@ -31,6 +31,7 @@ jobs:
           bash -n deploy/*.sh .github/scripts/symw_*.sh
           python3 -m py_compile deploy/preflight.py deploy/tools/push_workspace.py
           python3 -m json.tool deploy/config.json.example >/dev/null
+          python3 deploy/verify_gateway.py --check-pin
       - name: Validate Compose configuration
         shell: bash
         env:
