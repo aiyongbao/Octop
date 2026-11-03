@@ -20,6 +20,17 @@ RUN uv pip install --python /app/.venv/bin/python --no-cache -r /tmp/agent-packa
     && uv pip check --python /app/.venv/bin/python \
     && rm -rf /data/.cache/uv /tmp/agent-packages.txt
 
+# Install the company fork after all registry-based layers. The fork keeps the
+# upstream version, so force replacement and verify Git provenance plus files.
+# No dependency resolution here: retain uv.lock/security overrides, then check
+# compatibility. A missing commit or a mismatch must fail the image build.
+COPY deploy/gateway-requirements.txt deploy/gateway-source.json deploy/verify_gateway.py /tmp/gateway-build/
+RUN uv pip install --python /app/.venv/bin/python --no-cache --no-deps \
+        --reinstall-package octop-gateway -r /tmp/gateway-build/gateway-requirements.txt \
+    && uv pip check --python /app/.venv/bin/python \
+    && /app/.venv/bin/python /tmp/gateway-build/verify_gateway.py \
+    && rm -rf /data/.cache/uv /tmp/gateway-build
+
 COPY deploy/ /opt/deployment/
 RUN chmod 0755 /opt/deployment/*.sh
 

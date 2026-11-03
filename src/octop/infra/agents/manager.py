@@ -4032,6 +4032,7 @@ class AgentManager:
 
         from octop.infra.agents.middleware.binary_read_guard import BinaryReadGuardMiddleware
         from octop.infra.agents.middleware.browser_profile import BrowserProfileMiddleware
+        from octop.infra.agents.middleware.im_progress import IMBusinessProgressMiddleware
         from octop.infra.agents.middleware.mcp_output_schema import (
             McpOutputSchemaMiddleware,
             harness_handles_mcp_tool_errors,
@@ -4059,6 +4060,7 @@ class AgentManager:
                 policy_repo=self._repos.user_policy_repo,
                 usage_repo=self._repos.usage_repo,
             ),
+            IMBusinessProgressMiddleware(),
             OutputBudgetMiddleware(),
             ReasoningRequestMiddleware(),
             KnowledgeSearchHintMiddleware(),

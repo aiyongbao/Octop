@@ -1,0 +1,2 @@
+# Company gateway source is immutable; update gateway-source.json together.
+octop-gateway @ git+https://github.com/aiyongbao/octop-gateway.git@878d102f0abbde90ffba0c90c4680a282f10e9a3
