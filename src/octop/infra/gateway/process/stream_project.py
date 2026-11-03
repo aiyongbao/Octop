@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from octop_gateway.media import MediaBackend
-from octop_gateway.models import MessageEvent
+from octop_gateway.models import MessageEvent, MessageEventType
 
 from octop.i18n import channel_tool_hint_end, channel_tool_hint_start, tool_display_name
 from octop.infra.gateway.hitl.format import format_hitl_card, normalize_hitl_request
@@ -17,6 +17,7 @@ from octop.infra.gateway.media.tool_media import (
     media_events_from_tool_result,
 )
 from octop.infra.gateway.process.agent_resolve import harness_workspace_for_agent
+from octop.infra.gateway.process.tool_progress import LiveToolCall, ToolProgressTracker
 from octop.infra.gateway.process.usage_record import UsageTracker
 from octop.infra.history.projection import TurnHistoryTracker
 from octop.infra.utils.locale import DEFAULT_LOCALE, Locale, normalize_locale
@@ -38,9 +39,7 @@ class StreamProjectionState:
 @dataclass
 class _ToolProjectionState:
     current_node: str | None = None
-    tool_name_buf: dict[str, str] = field(default_factory=dict)
-    tool_started: set[str] = field(default_factory=set)
-    active_tool_idx: str | None = None
+    tools: ToolProgressTracker = field(default_factory=ToolProgressTracker)
     # True once we've seen at least one tool_call_chunk in this stream.
     # Media events are only emitted when a tool was actually called this turn;
     # historical tool results (replayed via PatchToolCallsMiddleware / Overwrite)
@@ -98,20 +97,24 @@ async def _project_chunks(
     def _tool_label(raw: str) -> str:
         return tool_display_name(raw, loc)
 
-    def _tool_start(raw: str) -> MessageEvent:
-        label = _tool_label(raw)
+    def _tool_start(call: LiveToolCall) -> MessageEvent:
+        label = _tool_label(call.name)
         return MessageEvent.tool_start(
             label,
             tool_hint_text=channel_tool_hint_start(label, loc),
             # Raw tool id for invoke-collapse / team channel UX (label is localized).
-            tool_key=raw,
+            tool_key=call.name,
+            tool_call_id=call.call_id,
         )
 
-    def _tool_end(raw: str) -> MessageEvent:
-        label = _tool_label(raw)
+    def _tool_end(call: LiveToolCall, status: str) -> MessageEvent:
+        label = _tool_label(call.name)
         return MessageEvent.tool_end(
             label,
             tool_hint_text=channel_tool_hint_end(label, loc),
+            tool_key=call.name,
+            tool_call_id=call.call_id,
+            status=status,
         )
 
     async for chunk in chunks:
@@ -140,24 +143,10 @@ async def _project_chunks(
 
         elif ctype == "tool_call_chunk":
             tool_state.saw_tool_call = True
-            idx_key = f"_idx_{chunk.get('index', 0)}"
-            tool_state.active_tool_idx = idx_key
-
-            name_frag: str = chunk.get("name") or ""
-            args_frag: str = chunk.get("args") or ""
-
-            if name_frag:
-                tool_state.tool_name_buf[idx_key] = (
-                    tool_state.tool_name_buf.get(idx_key, "") + name_frag
-                )
-
-            if (
-                args_frag
-                and idx_key not in tool_state.tool_started
-                and tool_state.tool_name_buf.get(idx_key)
-            ):
-                tool_state.tool_started.add(idx_key)
-                yield _tool_start(tool_state.tool_name_buf[idx_key])
+            call = tool_state.tools.feed(chunk)
+            if call.arguments and call.name and not call.started:
+                call.started = True
+                yield _tool_start(call)
 
         elif ctype == "tool_result":
             log_failed_tool_results(
@@ -167,18 +156,19 @@ async def _project_chunks(
                 seen=tool_state.emitted_tool_error_ids,
                 live=tool_state.saw_tool_call,
             )
-            final_name = (
-                tool_state.tool_name_buf.get(tool_state.active_tool_idx or "", "") or "tool"
-            )
-            if tool_state.active_tool_idx is not None:
-                idx = tool_state.active_tool_idx
-                if idx not in tool_state.tool_started:
-                    tool_state.tool_started.add(idx)
-                    yield _tool_start(final_name)
-                yield _tool_end(final_name)
-                tool_state.tool_name_buf.pop(idx, None)
-                tool_state.tool_started.discard(idx)
-                tool_state.active_tool_idx = None
+            for call, status in tool_state.tools.results(chunk):
+                if not call.started:
+                    call.started = True
+                    yield _tool_start(call)
+                yield _tool_end(call, status)
+                progress = call.progress(status)
+                if progress is not None:
+                    # TYPING metadata is optional: older adapters ignore it.
+                    # Only explicit task-list content crosses this boundary.
+                    yield MessageEvent(
+                        type=MessageEventType.TYPING, metadata={"task_progress": progress}
+                    )
+                call.arguments = ""
             if harness_workspace is not None and tool_state.saw_tool_call:
                 chunk_for_media = dedup_tool_result_messages(chunk, tool_state.emitted_media_ids)
                 if chunk_for_media is not None:
@@ -209,6 +199,11 @@ async def _project_chunks(
             return
 
         elif ctype == "state_update":
+            for call in tool_state.tools.complete_calls(chunk.get("data")):
+                tool_state.saw_tool_call = True
+                if not call.started and not call.ended:
+                    call.started = True
+                    yield _tool_start(call)
             if tool_state.current_node is not None and node != tool_state.current_node:
                 yield MessageEvent.flush()
             tool_state.current_node = node
