@@ -85,6 +85,7 @@ from octop.infra.skills.workspace_catalog import (
     list_workspace_skill_summaries,
     repair_workspace_skill_manifests,
 )
+from octop.infra.utils.live_tool_results import live_tool_stream
 from octop.infra.utils.locale import Locale
 from octop.infra.utils.turn_failure import turn_model_scope
 from octop.infra.utils.ulid import new_short_id
@@ -1906,6 +1907,7 @@ class AgentManager:
         finally:
             self._end_invocation(agent_id)
 
+    @live_tool_stream()
     async def stream(self, agent_id: str, request: dict[str, Any]) -> AsyncIterator[Any]:
         """Stream harness chunks (Langfuse tracing handled inside octop-harness)."""
         if self._harness_manager is None:
@@ -1951,6 +1953,7 @@ class AgentManager:
             return {"result": result}
         return result
 
+    @live_tool_stream(resume=True)
     async def resume_hitl(
         self,
         agent_id: str,
@@ -4040,6 +4043,7 @@ class AgentManager:
         from octop.infra.agents.middleware.octop_ui_offload import OctopUiOffloadMiddleware
         from octop.infra.agents.middleware.output_budget import OutputBudgetMiddleware
         from octop.infra.agents.middleware.reasoning import ReasoningRequestMiddleware
+        from octop.infra.agents.middleware.response_integrity import ResponseIntegrityMiddleware
         from octop.infra.agents.middleware.thread_artifacts import ThreadArtifactsMiddleware
         from octop.infra.agents.middleware.token_quota import TokenQuotaMiddleware
         from octop.infra.agents.middleware.workspace_image import (
@@ -4068,6 +4072,7 @@ class AgentManager:
             BinaryReadGuardMiddleware(),
             *(() if harness_handles_mcp_tool_errors() else (McpOutputSchemaMiddleware(),)),
             WorkspaceImageMaterializeMiddleware(workspace=ws),
+            ResponseIntegrityMiddleware(),
             ThreadArtifactsMiddleware(
                 thread_repo=self._repos.thread_repo,
                 workspace_dir=harness_workspace,

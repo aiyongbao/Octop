@@ -22,6 +22,13 @@ from octop.i18n.domains.stream import (
 )
 
 
+def test_incomplete_model_response_has_explicit_unfinished_message():
+    assert (
+        classify_stream_error_message("octop_incomplete_model_response: empty_final_response")
+        == "octop:stream_errors.incomplete_response"
+    )
+
+
 def test_classify_stream_stall_from_minimax_timeout() -> None:
     msg = (
         "Model call failed after 3 attempts with StreamChunkTimeoutError: "

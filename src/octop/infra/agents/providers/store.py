@@ -301,6 +301,10 @@ class ProviderStore:
     @staticmethod
     def _model_config_from_row(raw: dict[str, object]) -> ModelConfig:
         data = dict(raw)
+        # The model settings UI stores its output cap as max_tokens; harness
+        # ModelConfig expects max_output_tokens. Keep explicit new values first.
+        if data.get("max_output_tokens") is None and "max_tokens" in data:
+            data["max_output_tokens"] = data["max_tokens"]
         model_id = str(data.get("id") or "")
         explicit = data.get("input")
         inputs = list(explicit) if isinstance(explicit, list) else ["text"]
