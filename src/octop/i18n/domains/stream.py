@@ -103,6 +103,9 @@ def classify_stream_error_message(message: str) -> str | None:
     lower = msg.lower()
     compact = lower.replace("_", "").replace(" ", "")
 
+    if "octop_incomplete_model_response" in lower:
+        return "octop:stream_errors.incomplete_response"
+
     # Tool / backend path jail — must not look like a model-provider outage.
     if "outside root directory" in lower or "path traversal not allowed" in lower:
         return PATH_OUTSIDE_ROOT

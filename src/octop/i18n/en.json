@@ -748,6 +748,7 @@
     "start_timeout": "This expert took too long to start (storage backend I/O). Try again, or switch it to a local workspace backend."
   },
   "stream_errors": {
+    "incomplete_response": "The model did not return a complete result. This task is unfinished; its progress has been retained. Please retry or continue later.",
     "stream_stall": "The model stopped sending content while the connection stayed open. Click Retry, or try again later with another model. If this happens often, check the provider status or ask an admin to review stream timeout settings.",
     "rate_limit": "The model provider rate-limited this request. Wait a moment and retry, or switch to another model.",
     "auth": "Model authentication failed. Check that the API key under Admin → Model Management is correct and still valid.",
